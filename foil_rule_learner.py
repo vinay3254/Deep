@@ -1,0 +1,106 @@
+from collections import Counter
+import math
+import pandas as pd
+from io import StringIO
+
+# Load dataset
+tennis_csv = """Outlook,Temperature,Humidity,Windy,Play
+Sunny,Hot,High,False,No
+Sunny,Hot,High,True,No
+Overcast,Hot,High,False,Yes
+Rain,Mild,High,False,Yes
+Rain,Cool,Normal,False,Yes
+Rain,Cool,Normal,True,No
+Overcast,Cool,Normal,True,Yes
+Sunny,Mild,High,False,No
+Sunny,Cool,Normal,False,Yes
+Rain,Mild,Normal,False,Yes
+Sunny,Mild,Normal,True,Yes
+Overcast,Mild,High,True,Yes
+Overcast,Hot,Normal,False,Yes
+Rain,Mild,High,True,No"""
+
+csv = StringIO(tennis_csv)
+df = pd.read_csv(csv)
+target_col = "Play"
+positive_label = "Yes"
+negative_label = "No"
+
+for c in df.columns:
+    if df[c].dtype == bool:
+        df[c] = df[c].astype(str)
+
+# FOIL-style rule learner
+def covered_indices(rule, data):
+    if not rule:
+        return set(data.index)
+    mask = pd.Series([True] * len(data), index=data.index)
+    for (attr, val) in rule:
+        mask = mask & (data[attr] == val)
+    return set(data[mask].index)
+
+def foil_gain(p0, n0, p1, n1, t):
+    if p0 + n0 == 0 or p1 + n1 == 0 or p1 == 0:
+        return -1e9
+    return t * (math.log2(p1 / (p1 + n1)) - math.log2(p0 / (p0 + n0)))
+
+def learn_rules(data, target_col, positive_label):
+    attributes = [c for c in data.columns if c != target_col]
+    remaining_pos = set(data[data[target_col] == positive_label].index)
+    rules = []
+    while remaining_pos:
+        rule = []
+        covered = covered_indices(rule, data)
+        p0 = sum(data.loc[i, target_col] == positive_label for i in covered)
+        n0 = len(covered) - p0
+        while True:
+            best_gain, best_cond, best_cov = 0, None, None
+            used_attrs = {a for a, _ in rule}
+            for attr in attributes:
+                if attr in used_attrs:
+                    continue
+                for val in sorted(data[attr].unique()):
+                    new_rule = rule + [(attr, val)]
+                    cov = covered_indices(new_rule, data)
+                    p1 = sum(data.loc[i, target_col] == positive_label for i in cov)
+                    n1 = len(cov) - p1
+                    t = len(cov & remaining_pos)
+                    gain = foil_gain(p0, n0, p1, n1, t)
+                    if gain > best_gain:
+                        best_gain, best_cond, best_cov = gain, (attr, val), cov
+            if best_cond is None:
+                break
+            rule.append(best_cond)
+            covered = best_cov
+            p0 = sum(data.loc[i, target_col] == positive_label for i in covered)
+            n0 = len(covered) - p0
+            if n0 == 0 or len(rule) >= len(attributes):
+                break
+        rules.append(rule)
+        remaining_pos -= {i for i in covered if data.loc[i, target_col] == positive_label}
+        if not rule:
+            break
+    return rules
+
+def predict_row(row, rules, pos, neg):
+    for rule in rules:
+        if all(str(row[a]) == str(v) for (a, v) in rule):
+            return pos
+    return neg
+
+def evaluate(data, rules, target_col, pos, neg):
+    preds = [predict_row(row, rules, pos, neg) for _, row in data.iterrows()]
+    acc = sum(data[target_col].values == preds) / len(data)
+    return acc, preds
+
+rules = learn_rules(df, target_col, positive_label)
+acc, preds = evaluate(df, rules, target_col, positive_label, negative_label)
+
+def as_rule_str(rule):
+    return (" AND ".join(f"{a}={v}" for a, v in rule) if rule else "TRUE") + f" -> {positive_label}"
+
+print("Learned rules:")
+for i, r in enumerate(rules, 1):
+    print(f"R{i}: {as_rule_str(r)}")
+print("Default: ELSE ->", negative_label)
+print(f"Accuracy: {acc*100:.1f}%")
